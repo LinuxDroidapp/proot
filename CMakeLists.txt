@@ -37,8 +37,8 @@ set(PROOT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(SHM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libandroid-shmem")
 set(TALLOC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/talloc")
 
-# 1. Samba talloc shared library
-add_library(talloc SHARED "${TALLOC_ROOT}/talloc.c")
+# 1. Samba talloc library (static for standalone proot)
+add_library(talloc STATIC "${TALLOC_ROOT}/talloc.c")
 target_include_directories(talloc PUBLIC "${TALLOC_ROOT}")
 target_compile_definitions(talloc PRIVATE
     _GNU_SOURCE
@@ -48,23 +48,24 @@ target_compile_definitions(talloc PRIVATE
     TALLOC_BUILD_VERSION_RELEASE=0
 )
 target_compile_options(talloc PRIVATE
+    -fPIC
     -Wno-implicit-function-declaration
     -Wno-error=implicit-function-declaration
     -Wno-incompatible-function-pointer-types
 )
-set_target_properties(talloc PROPERTIES OUTPUT_NAME talloc SOVERSION 2)
 
-# 2. Android Shared Memory emulation
+# 2. Android Shared Memory emulation (static for standalone proot)
 if(ANDROID)
-    add_library(android-shmem SHARED "${SHM_ROOT}/shmem.c")
+    add_library(android-shmem STATIC "${SHM_ROOT}/shmem.c")
     target_include_directories(android-shmem PUBLIC "${SHM_ROOT}")
     target_compile_definitions(android-shmem PRIVATE _PATH_TMP="/data/data/com.linuxdroid/cache/")
     target_compile_options(android-shmem PRIVATE
+        -fPIC
         -Wno-implicit-function-declaration
         -Wno-error=implicit-function-declaration
         -Wno-incompatible-function-pointer-types
     )
-    target_link_libraries(android-shmem PRIVATE log android)
+    target_link_libraries(android-shmem PUBLIC log android)
 endif()
 
 # 3. Native JNI process spawner (Android only)
@@ -192,7 +193,7 @@ if(ANDROID)
         "SHELL:-include string.h"
         "SHELL:-include ${SHM_ROOT}/shm.h"
     )
-    target_link_libraries(proot PRIVATE talloc android-shmem)
+    target_link_libraries(proot PRIVATE talloc android-shmem log android)
 else()
     target_link_libraries(proot PRIVATE talloc)
 endif()
@@ -232,8 +233,6 @@ add_custom_command(TARGET proot_loader-carrier POST_BUILD
 # 9. 16KB ELF page size alignment for Android 15 / modern devices
 if(ANDROID)
     set(ALL_TARGETS
-        talloc
-        android-shmem
         linuxdroidspawn
         pocketspawn
         proot

@@ -193,4 +193,17 @@ typedef unsigned char byte_t;
 
 #endif
 
+static inline word_t normalize_tracee_address(word_t address)
+{
+#if defined(ARCH_ARM64) || defined(__aarch64__)
+	return address & 0x00FFFFFFFFFFFFFFULL;
+#else
+	return address;
+#endif
+}
+
+#ifndef UNTAG_ADDRESS
+#define UNTAG_ADDRESS(addr) normalize_tracee_address((word_t)(addr))
+#endif
+
 #endif /* ARCH_H */
