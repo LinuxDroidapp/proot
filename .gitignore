@@ -8,3 +8,10 @@
 /src/proot
 
 *~
+
+# Build outputs
+/build/
+/.gradle/
+/.cxx/
+/dist/
+build-*/
