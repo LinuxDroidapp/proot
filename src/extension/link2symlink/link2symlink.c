@@ -45,7 +45,6 @@
 #define IFTODT(mode) (((mode) & S_IFMT) >> 12)
 #endif
 
-static int decrement_link_count(Tracee *tracee, Reg sysarg);
 static int decrement_intermediate_count(Tracee *tracee, const char original[PATH_MAX],
 					const char intermediate[PATH_MAX]);
 
@@ -374,8 +373,10 @@ static int get_link_count(const char *host_path)
 	if ((size_t) (dot - name) < strlen(PREFIX) + 4)
 		return -1;
 
+	/* Not "dot[-i]": -i is a huge unsigned offset, clang 21 then
+	 * assumes dot is NULL, and PRoot crashes.  */
 	for (i = 1; i <= 4; i++) {
-		if (!isdigit((unsigned char) dot[-i]))
+		if (!isdigit((unsigned char) *(dot - i)))
 			return -1;
 	}
 
@@ -482,6 +483,38 @@ static int read_intermediate(const char intermediate[PATH_MAX], char final[PATH_
 	/* Not a chain this extension made: there is no count to read in
 	 * this name, and nothing to rename or to delete on its behalf.  */
 	if (!is_l2s_file(final))
+		return -ENOENT;
+
+	return 0;
+}
+
+/**
+ * Copy in @intermediate the path of the intermediate that points to
+ * @final, a file this extension has moved into the l2s directory, c.f.
+ * get_link_count().  This function returns -errno if there's none,
+ * otherwise 0.
+ */
+static int find_intermediate(const char final[PATH_MAX], char intermediate[PATH_MAX])
+{
+	char pointee[PATH_MAX];
+	struct stat statf;
+	struct stat statp;
+	size_t length;
+	int status;
+
+	/* "<PREFIX><name><NNNN>" lies next to "<PREFIX><name><NNNN>.<count>".  */
+	length = strrchr(final, '.') - final;
+	memcpy(intermediate, final, length);
+	intermediate[length] = '\0';
+
+	status = read_intermediate(intermediate, pointee);
+	if (status < 0)
+		return status;
+
+	/* The same file, whatever the path spells.  */
+	if (stat(final, &statf) < 0 || stat(pointee, &statp) < 0)
+		return -errno;
+	if (statf.st_dev != statp.st_dev || statf.st_ino != statp.st_ino)
 		return -ENOENT;
 
 	return 0;
@@ -775,6 +808,15 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 			 * absolute one, out of the guest rootfs.  */
 			return link_symbolic_link(tracee, intermediate, link_target_sysarg);
 		}
+	} else if (is_l2s_file(original) && find_intermediate(original, intermediate) == 0) {
+		/* linkat(AT_SYMLINK_FOLLOW) -- what ln(1) does on Termux
+		 * -- is handed the file a faked hard link stands for:
+		 * PRoot dereferenced that link like any symbolic link.
+		 * It is linked like the faked hard link, through its
+		 * intermediate.  It used to be linked as a new file, under
+		 * a name made of its own, so the count of the first chain
+		 * stayed as it was.  */
+		first_link = 0;
 	} else {
 		/* compute new name */
 		name = strrchr(original,'/');
@@ -906,7 +948,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	if (status >= 0 && symlink(intermediate, final) < 0)
 		status = -errno;
 	if (status < 0) {
-		decrement_link_count(tracee, sysarg);
+		(void) decrement_intermediate_count(tracee, original, intermediate);
 		return status;
 	}
 	poke_reg(tracee, SYSARG_RESULT, 0);
@@ -915,52 +957,6 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	return 0;
 }
 
-
-/* If path points a file that is a symlink to a file that begins
- *   with PREFIX, let the file be deleted, but also delete the
- *   symlink that was created and decremnt the count that is tacked
- *   to end of original file.
- */
-static int decrement_link_count(Tracee *tracee, Reg sysarg)
-{
-	char original[PATH_MAX];
-	char intermediate[PATH_MAX];
-	char * name;
-	struct stat statl;
-	ssize_t size;
-	int status;
-
-	/* Note: this path was already canonicalized.  */
-	size = read_string(tracee, original, peek_reg(tracee, CURRENT, sysarg), PATH_MAX);
-	if (size < 0)
-		return size;
-	if (size >= PATH_MAX)
-		return -ENAMETOOLONG;
-
-	/* Check if it is a converted link already.  */
-	status = lstat(original, &statl);
-	if (status < 0)
-		return 0;
-
-	if (!S_ISLNK(statl.st_mode))
-		return 0;
-
-	size = my_readlink(original, intermediate);
-	if (size < 0)
-		return size;
-
-	name = strrchr(intermediate, '/');
-	if (name == NULL)
-		name = intermediate;
-	else
-		name++;
-
-	/* Check if an l2s file is pointed to */
-	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-		return 0;
-
-	return decrement_intermediate_count(tracee, original, intermediate);
-}
 
 /**
  * Decrement the count of the file the @intermediate of the faked hard
@@ -1601,14 +1597,6 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 	Tracee *tracee = TRACEE(extension);
 	Link2SymlinkConfig *config;
 	char final[PATH_MAX];
-
-	/* The tracee is not started yet: PRoot is looking up the program
-	 * to launch, c.f. which().  Keep the name of a faked hard link
-	 * there, as the kernel would, so that the canonicalization of
-	 * the first execve(2) goes through it and "/proc/<PID>/exe"
-	 * reports it, c.f. execve_proc_exe().  */
-	if (tracee->exe == NULL)
-		return;
 
 	/* Don't translate l2s symlinks if call is (un)link */
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
